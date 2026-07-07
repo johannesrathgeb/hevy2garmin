@@ -272,19 +272,46 @@ def find_matching_garmin_activity(
     except Exception as e:
         logger.warning("Could not query Garmin activities for merge: %s", e)
         return None
+    
+    logger.info(
+        "Merge debug: Hevy window %s → %s; search Garmin date range %s → %s; allowed types=%s; threshold=%.0f%%; drift<=%smin; Garmin candidates=%d",
+        start_raw,
+        end_raw,
+        search_start,
+        search_end,
+        sorted(activity_types or []),
+        overlap_threshold * 100,
+        max_drift_minutes,
+        len(activities or []),
+    )
+    
+    for a in (activities or [])[:20]:
+        logger.info(
+            "Merge candidate: id=%s type=%s name=%s startGMT=%s startLocal=%s duration=%s manufacturer=%s",
+            a.get("activityId"),
+            (a.get("activityType") or {}).get("typeKey"),
+            a.get("activityName"),
+            a.get("startTimeGMT"),
+            a.get("startTimeLocal"),
+            a.get("duration"),
+            a.get("manufacturer"),
+        )
 
     best_score = 0.0
     best: dict | None = None
 
     for act in (activities or []):
+        act_id = act.get("activityId")
         # Hard filter: only configured activity types are eligible for merge
         act_type = act.get("activityType", {}).get("typeKey", "")
         if act_type not in activity_types:
+            logger.info("Merge reject %s: type %s not in %s", act_id, act_type, sorted(activity_types))
             continue
 
         # Must be a completed activity (has duration)
         act_duration = act.get("duration", 0)
         if not act_duration or act_duration <= 0:
+            logger.info("Merge reject %s: invalid duration %s", act_id, act_duration)
             continue
 
         # Parse start time
@@ -315,12 +342,24 @@ def find_matching_garmin_activity(
         overlap_pct = overlap_s / hevy_duration
 
         if overlap_pct < overlap_threshold:
+            logger.info(
+                "Merge reject %s: overlap %.1f%% below %.1f%%",
+                act_id,
+                overlap_pct * 100,
+                overlap_threshold * 100,
+            )
             continue
 
         # Check start drift
         drift_s = abs((act_start - hevy_start).total_seconds())
         drift_min = drift_s / 60
         if drift_min > max_drift_minutes:
+            logger.info(
+                "Merge reject %s: drift %.1fmin above %smin",
+                act_id,
+                drift_min,
+                max_drift_minutes,
+            )
             continue
 
         # Score: overlap dominates, drift is a small penalty
