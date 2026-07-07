@@ -29,11 +29,13 @@ def get_client(
     falls back to file-based tokens (local/Docker).
     """
     from hevy2garmin.db import get_database_url
+
     database_url = get_database_url()
 
     kwargs: dict = {"email": email, "password": password}
     if database_url:
         from garmin_auth.storage import DBTokenStore
+
         kwargs["store"] = DBTokenStore(database_url)
         # Use /tmp for garth token files on read-only filesystems (Vercel)
         kwargs["token_dir"] = "/tmp/.garminconnect"
@@ -84,17 +86,18 @@ def upload_fit(client: Garmin, fit_path: str | Path, workout_start: str | None =
         resp = _limiter.call(client.upload_activity, str(fit_path))
     except Exception as e:
         # Extract response body from exception chain for debugging
-        response = getattr(e, 'response', None)
+        response = getattr(e, "response", None)
         if response is None and e.__cause__:
-            response = getattr(e.__cause__, 'response', None)
+            response = getattr(e.__cause__, "response", None)
         if response is None and e.__context__:
-            response = getattr(e.__context__, 'response', None)
+            response = getattr(e.__context__, "response", None)
         if response is not None:
-            body = response.text[:2000] if hasattr(response, 'text') else str(response)
-            logger.error("Upload rejected — status=%s body=%s", getattr(response, 'status_code', '?'), body)
+            body = response.text[:2000] if hasattr(response, "text") else str(response)
+            logger.error("Upload rejected — status=%s body=%s", getattr(response, "status_code", "?"), body)
             raise RuntimeError(f"Garmin upload failed ({getattr(response, 'status_code', '?')}): {body}") from e
         logger.error("Upload failed (no response): %s", str(e)[:300])
         raise
+
     upload_id = None
     activity_id = None
 
@@ -166,7 +169,7 @@ def find_activity_by_start_time(
         if act_type and act_type not in ("strength_training", "other"):
             continue
 
-        # Prefer startTimeGMT (UTC) over startTimeLocal to avoid timezone mismatch
+        # Prefer startTimeGMT (UTC) for finding the activity that was just uploaded.
         act_start_str = act.get("startTimeGMT") or act.get("startTimeLocal", "")
         try:
             if "T" not in act_start_str:
@@ -209,7 +212,8 @@ def upload_image(client: Garmin, activity_id: int, image_bytes: bytes, filename:
     """Upload an image to a Garmin activity."""
     files = {"file": (filename, io.BytesIO(image_bytes))}
     client.client.request(
-        "POST", "connectapi",
+        "POST",
+        "connectapi",
         f"/activity-service/activity/{activity_id}/image",
         files=files,
     )
@@ -235,9 +239,43 @@ def find_matching_garmin_activity(
     types (e.g. ``"bouldering"``, ``"indoor_climbing"``) to also enhance
     non-strength watch activities with Hevy exercise data.
     """
+    from datetime import datetime, timedelta, timezone
+
+    def _parse_local_wall_time(value: str) -> datetime:
+        """Parse a timestamp and drop tzinfo for local wall-clock matching.
+
+        In practice, Hevy can report the workout's local wall-clock time with a
+        +00:00 suffix, while Garmin exposes the watch activity as both
+        startTimeGMT and startTimeLocal. For deciding whether a watch-recorded
+        strength activity is the same workout, comparing Hevy to Garmin's
+        startTimeLocal is the reliable path.
+        """
+        value = str(value or "")
+        if not value:
+            raise ValueError("missing datetime")
+        value = value.replace("Z", "+00:00")
+        if "T" not in value:
+            value = value.replace(" ", "T")
+        return datetime.fromisoformat(value).replace(tzinfo=None)
+
+    def _parse_gmt_as_utc(value: str) -> datetime | None:
+        """Parse Garmin startTimeGMT as an aware UTC datetime for future checks."""
+        value = str(value or "")
+        if not value:
+            return None
+        value = value.replace("Z", "+00:00")
+        if "T" not in value:
+            value = value.replace(" ", "T")
+        try:
+            dt = datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
     if activity_types is None:
         activity_types = {"strength_training"}
-    from datetime import datetime, timedelta, timezone
 
     start_raw = hevy_workout.get("start_time") or hevy_workout.get("startTime", "")
     end_raw = hevy_workout.get("end_time") or hevy_workout.get("endTime", "")
@@ -245,18 +283,8 @@ def find_matching_garmin_activity(
         return None
 
     try:
-        hevy_start = datetime.fromisoformat(start_raw.replace("Z", "+00:00")).replace(tzinfo=None)
-        hevy_end = datetime.fromisoformat(end_raw.replace("Z", "+00:00")).replace(tzinfo=None)
-    
-        if hevy_start.tzinfo is None:
-            hevy_start = hevy_start.replace(tzinfo=timezone.utc)
-        else:
-            hevy_start = hevy_start.astimezone(timezone.utc)
-    
-        if hevy_end.tzinfo is None:
-            hevy_end = hevy_end.replace(tzinfo=timezone.utc)
-        else:
-            hevy_end = hevy_end.astimezone(timezone.utc)
+        hevy_start = _parse_local_wall_time(start_raw)
+        hevy_end = _parse_local_wall_time(end_raw)
     except (ValueError, TypeError):
         return None
 
@@ -264,7 +292,7 @@ def find_matching_garmin_activity(
     if hevy_duration <= 0:
         return None
 
-    # Query activities in a window around the workout
+    # Query activities in a window around the workout.
     search_start = (hevy_start - timedelta(hours=2)).date().isoformat()
     search_end = (hevy_end + timedelta(hours=2)).date().isoformat()
     try:
@@ -272,7 +300,7 @@ def find_matching_garmin_activity(
     except Exception as e:
         logger.warning("Could not query Garmin activities for merge: %s", e)
         return None
-    
+
     logger.info(
         "Merge debug: Hevy window %s → %s; search Garmin date range %s → %s; allowed types=%s; threshold=%.0f%%; drift<=%smin; Garmin candidates=%d",
         start_raw,
@@ -284,7 +312,7 @@ def find_matching_garmin_activity(
         max_drift_minutes,
         len(activities or []),
     )
-    
+
     for a in (activities or [])[:20]:
         logger.info(
             "Merge candidate: id=%s type=%s name=%s startGMT=%s startLocal=%s duration=%s manufacturer=%s",
@@ -299,43 +327,47 @@ def find_matching_garmin_activity(
 
     best_score = 0.0
     best: dict | None = None
+    best_overlap_pct = 0.0
+    best_drift_min = 0.0
 
     for act in (activities or []):
         act_id = act.get("activityId")
-        # Hard filter: only configured activity types are eligible for merge
+
+        # Hard filter: only configured activity types are eligible for merge.
         act_type = act.get("activityType", {}).get("typeKey", "")
         if act_type not in activity_types:
             logger.info("Merge reject %s: type %s not in %s", act_id, act_type, sorted(activity_types))
             continue
 
-        # Must be a completed activity (has duration)
+        # Must be a completed activity (has duration).
         act_duration = act.get("duration", 0)
         if not act_duration or act_duration <= 0:
             logger.info("Merge reject %s: invalid duration %s", act_id, act_duration)
             continue
 
-        # Parse start time
+        # For merge matching, prefer Garmin's local watch time. This fixes cases
+        # where Hevy reports local wall-clock time with a +00:00 suffix.
         act_start_str = act.get("startTimeLocal") or act.get("startTimeGMT", "")
         try:
-            if "T" not in act_start_str:
-                act_start_str = act_start_str.replace(" ", "T")
-            act_start = datetime.fromisoformat(act_start_str)
-            if act_start.tzinfo is None:
-                act_start = act_start.replace(tzinfo=timezone.utc)
-            else:
-                act_start = act_start.astimezone(timezone.utc)
+            act_start = _parse_local_wall_time(act_start_str)
         except (ValueError, TypeError):
+            logger.info("Merge reject %s: invalid start time %s", act_id, act_start_str)
             continue
 
-        act_end = act_start + timedelta(seconds=act_duration)
+        act_end = act_start + timedelta(seconds=float(act_duration))
 
-        # Check: activity must be finished. Garmin only sets duration > 0
-        # once the activity is saved/stopped. We also reject activities whose
-        # end time is more than 5 minutes into the future (clock skew margin).
-        if act_end > datetime.now() + timedelta(minutes=5):
-            continue
+        # Check whether the Garmin activity is complete without mixing local
+        # matching times with runner/container timezone. If Garmin provides GMT,
+        # use it only for this real-time future check. If not, duration > 0 is
+        # the completion signal and we skip the future check.
+        act_start_utc = _parse_gmt_as_utc(act.get("startTimeGMT", ""))
+        if act_start_utc is not None:
+            act_end_utc = act_start_utc + timedelta(seconds=float(act_duration))
+            if act_end_utc > datetime.now(timezone.utc) + timedelta(minutes=5):
+                logger.info("Merge reject %s: activity appears to end in the future", act_id)
+                continue
 
-        # Compute temporal overlap
+        # Compute temporal overlap using local wall-clock times only.
         overlap_start = max(hevy_start, act_start)
         overlap_end = min(hevy_end, act_end)
         overlap_s = max(0.0, (overlap_end - overlap_start).total_seconds())
@@ -350,7 +382,7 @@ def find_matching_garmin_activity(
             )
             continue
 
-        # Check start drift
+        # Check start drift using local wall-clock times only.
         drift_s = abs((act_start - hevy_start).total_seconds())
         drift_min = drift_s / 60
         if drift_min > max_drift_minutes:
@@ -362,16 +394,20 @@ def find_matching_garmin_activity(
             )
             continue
 
-        # Score: overlap dominates, drift is a small penalty
+        # Score: overlap dominates, drift is a small penalty.
         score = (overlap_pct * 100) - (drift_min * 0.5)
         if score > best_score:
             best_score = score
             best = act
+            best_overlap_pct = overlap_pct
+            best_drift_min = drift_min
 
     if best:
         logger.info(
             "Merge match: Garmin activity %s (overlap %.0f%%, drift %.1fmin)",
-            best.get("activityId"), best_score, 0,
+            best.get("activityId"),
+            best_overlap_pct * 100,
+            best_drift_min,
         )
     return best
 
@@ -407,8 +443,8 @@ def generate_description(workout: dict, calories: int | None = None, avg_hr: int
     end = workout.get("end_time") or workout.get("endTime", "")
     if start and end:
         from datetime import datetime
+
         try:
-            fmt = "%Y-%m-%dT%H:%M:%S%z" if "T" in start else "%Y-%m-%d %H:%M:%S"
             t0 = datetime.fromisoformat(start.replace("Z", "+00:00"))
             t1 = datetime.fromisoformat(end.replace("Z", "+00:00"))
             duration_s = int((t1 - t0).total_seconds())
