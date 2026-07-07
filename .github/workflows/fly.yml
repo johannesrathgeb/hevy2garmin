@@ -38,7 +38,7 @@ jobs:
           H2G_PASSWORD: ${{ secrets.H2G_PASSWORD }}
           HEVY2GARMIN_SECRET: ${{ secrets.HEVY2GARMIN_SECRET }}
           GITHUB_PAT: ${{ secrets.GH_DISPATCH_PAT }}
-          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+          GITHUB_REPO: ${{ secrets.H2G_GITHUB_REPO }}
         run: |
           {
             echo "DATABASE_URL=$DATABASE_URL"
@@ -48,7 +48,7 @@ jobs:
             echo "H2G_PASSWORD=$H2G_PASSWORD"
             echo "HEVY2GARMIN_SECRET=$HEVY2GARMIN_SECRET"
             echo "GITHUB_PAT=$GITHUB_PAT"
-            echo "GITHUB_REPO=$GITHUB_REPO"
+            echo "GITHUB_REPO=$H2G_GITHUB_REPO"
           } | flyctl secrets import --app "$FLY_APP" --stage
 
       - name: Deploy
