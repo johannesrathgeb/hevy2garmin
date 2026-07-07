@@ -247,6 +247,16 @@ def find_matching_garmin_activity(
     try:
         hevy_start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
         hevy_end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+    
+        if hevy_start.tzinfo is None:
+            hevy_start = hevy_start.replace(tzinfo=timezone.utc)
+        else:
+            hevy_start = hevy_start.astimezone(timezone.utc)
+    
+        if hevy_end.tzinfo is None:
+            hevy_end = hevy_end.replace(tzinfo=timezone.utc)
+        else:
+            hevy_end = hevy_end.astimezone(timezone.utc)
     except (ValueError, TypeError):
         return None
 
@@ -285,6 +295,8 @@ def find_matching_garmin_activity(
             act_start = datetime.fromisoformat(act_start_str)
             if act_start.tzinfo is None:
                 act_start = act_start.replace(tzinfo=timezone.utc)
+            else:
+                act_start = act_start.astimezone(timezone.utc)
         except (ValueError, TypeError):
             continue
 
@@ -297,8 +309,8 @@ def find_matching_garmin_activity(
             continue
 
         # Compute temporal overlap
-        overlap_start = max(hevy_start.replace(tzinfo=timezone.utc), act_start.replace(tzinfo=timezone.utc))
-        overlap_end = min(hevy_end.replace(tzinfo=timezone.utc), act_end.replace(tzinfo=timezone.utc))
+        overlap_start = max(hevy_start, act_start)
+        overlap_end = min(hevy_end, act_end)
         overlap_s = max(0.0, (overlap_end - overlap_start).total_seconds())
         overlap_pct = overlap_s / hevy_duration
 
@@ -306,7 +318,7 @@ def find_matching_garmin_activity(
             continue
 
         # Check start drift
-        drift_s = abs((act_start.replace(tzinfo=timezone.utc) - hevy_start.replace(tzinfo=timezone.utc)).total_seconds())
+        drift_s = abs((act_start - hevy_start).total_seconds())
         drift_min = drift_s / 60
         if drift_min > max_drift_minutes:
             continue
