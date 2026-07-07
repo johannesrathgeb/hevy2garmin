@@ -1,0 +1,39 @@
+name: Hevy Auto Sync
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types:
+      - sync-trigger
+  schedule:
+    - cron: "17 */1 * * *"
+
+concurrency:
+  group: hevy-auto-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync Hevy workouts to Garmin
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install hevy2garmin
+        run: pip install ".[cloud]"
+
+      - name: Sync latest workouts
+        env:
+          GITHUB_ACTIONS: "true"
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          HEVY_API_KEY: ${{ secrets.HEVY_API_KEY }}
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+        run: hevy2garmin sync -n 10
