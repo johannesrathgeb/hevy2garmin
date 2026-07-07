@@ -1,0 +1,58 @@
+name: Fly Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy dashboard to Fly.io
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Create Fly app if missing
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: ${{ secrets.FLY_APP }}
+        run: |
+          flyctl apps create "$FLY_APP" || true
+
+      - name: Sync GitHub secrets to Fly secrets
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: ${{ secrets.FLY_APP }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          HEVY_API_KEY: ${{ secrets.HEVY_API_KEY }}
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          H2G_PASSWORD: ${{ secrets.H2G_PASSWORD }}
+          HEVY2GARMIN_SECRET: ${{ secrets.HEVY2GARMIN_SECRET }}
+          GITHUB_PAT: ${{ secrets.GH_DISPATCH_PAT }}
+          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+        run: |
+          {
+            echo "DATABASE_URL=$DATABASE_URL"
+            echo "HEVY_API_KEY=$HEVY_API_KEY"
+            echo "GARMIN_EMAIL=$GARMIN_EMAIL"
+            echo "GARMIN_PASSWORD=$GARMIN_PASSWORD"
+            echo "H2G_PASSWORD=$H2G_PASSWORD"
+            echo "HEVY2GARMIN_SECRET=$HEVY2GARMIN_SECRET"
+            echo "GITHUB_PAT=$GITHUB_PAT"
+            echo "GITHUB_REPO=$GITHUB_REPO"
+          } | flyctl secrets import --app "$FLY_APP" --stage
+
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: ${{ secrets.FLY_APP }}
+        run: flyctl deploy --app "$FLY_APP" --remote-only
