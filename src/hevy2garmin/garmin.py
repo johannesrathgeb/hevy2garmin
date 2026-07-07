@@ -245,8 +245,8 @@ def find_matching_garmin_activity(
         return None
 
     try:
-        hevy_start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
-        hevy_end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+        hevy_start = datetime.fromisoformat(start_raw.replace("Z", "+00:00")).replace(tzinfo=None)
+        hevy_end = datetime.fromisoformat(end_raw.replace("Z", "+00:00")).replace(tzinfo=None)
     
         if hevy_start.tzinfo is None:
             hevy_start = hevy_start.replace(tzinfo=timezone.utc)
@@ -315,7 +315,7 @@ def find_matching_garmin_activity(
             continue
 
         # Parse start time
-        act_start_str = act.get("startTimeGMT") or act.get("startTimeLocal", "")
+        act_start_str = act.get("startTimeLocal") or act.get("startTimeGMT", "")
         try:
             if "T" not in act_start_str:
                 act_start_str = act_start_str.replace(" ", "T")
@@ -332,7 +332,7 @@ def find_matching_garmin_activity(
         # Check: activity must be finished. Garmin only sets duration > 0
         # once the activity is saved/stopped. We also reject activities whose
         # end time is more than 5 minutes into the future (clock skew margin).
-        if act_end > datetime.now(timezone.utc) + timedelta(minutes=5):
+        if act_end > datetime.now() + timedelta(minutes=5):
             continue
 
         # Compute temporal overlap
