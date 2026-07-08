@@ -238,18 +238,18 @@ def find_matching_garmin_activity(
     ``activity_types`` (default: ``{"strength_training"}``). Pass additional
     types (e.g. ``"bouldering"``, ``"indoor_climbing"``) to also enhance
     non-strength watch activities with Hevy exercise data.
+
+    Note on time matching:
+    Hevy/Garmin timestamp behavior is inconsistent in the wild. Some Hevy
+    workouts arrive as the local wall-clock time with a ``+00:00`` suffix,
+    while others arrive as real UTC. Garmin exposes both ``startTimeGMT`` and
+    ``startTimeLocal``. To avoid duplicates, we try both Garmin start times and
+    accept the one that best overlaps the Hevy window.
     """
     from datetime import datetime, timedelta, timezone
 
-    def _parse_local_wall_time(value: str) -> datetime:
-        """Parse a timestamp and drop tzinfo for local wall-clock matching.
-
-        In practice, Hevy can report the workout's local wall-clock time with a
-        +00:00 suffix, while Garmin exposes the watch activity as both
-        startTimeGMT and startTimeLocal. For deciding whether a watch-recorded
-        strength activity is the same workout, comparing Hevy to Garmin's
-        startTimeLocal is the reliable path.
-        """
+    def _parse_wall_time(value: str) -> datetime:
+        """Parse an ISO-ish timestamp and drop tzinfo for overlap matching."""
         value = str(value or "")
         if not value:
             raise ValueError("missing datetime")
@@ -283,8 +283,8 @@ def find_matching_garmin_activity(
         return None
 
     try:
-        hevy_start = _parse_local_wall_time(start_raw)
-        hevy_end = _parse_local_wall_time(end_raw)
+        hevy_start = _parse_wall_time(start_raw)
+        hevy_end = _parse_wall_time(end_raw)
     except (ValueError, TypeError):
         return None
 
@@ -329,6 +329,7 @@ def find_matching_garmin_activity(
     best: dict | None = None
     best_overlap_pct = 0.0
     best_drift_min = 0.0
+    best_time_source = ""
 
     for act in (activities or []):
         act_id = act.get("activityId")
@@ -345,16 +346,7 @@ def find_matching_garmin_activity(
             logger.info("Merge reject %s: invalid duration %s", act_id, act_duration)
             continue
 
-        # For merge matching, prefer Garmin's local watch time. This fixes cases
-        # where Hevy reports local wall-clock time with a +00:00 suffix.
-        act_start_str = act.get("startTimeLocal") or act.get("startTimeGMT", "")
-        try:
-            act_start = _parse_local_wall_time(act_start_str)
-        except (ValueError, TypeError):
-            logger.info("Merge reject %s: invalid start time %s", act_id, act_start_str)
-            continue
-
-        act_end = act_start + timedelta(seconds=float(act_duration))
+        act_duration = float(act_duration)
 
         # Check whether the Garmin activity is complete without mixing local
         # matching times with runner/container timezone. If Garmin provides GMT,
@@ -362,55 +354,83 @@ def find_matching_garmin_activity(
         # the completion signal and we skip the future check.
         act_start_utc = _parse_gmt_as_utc(act.get("startTimeGMT", ""))
         if act_start_utc is not None:
-            act_end_utc = act_start_utc + timedelta(seconds=float(act_duration))
+            act_end_utc = act_start_utc + timedelta(seconds=act_duration)
             if act_end_utc > datetime.now(timezone.utc) + timedelta(minutes=5):
                 logger.info("Merge reject %s: activity appears to end in the future", act_id)
                 continue
 
-        # Compute temporal overlap using local wall-clock times only.
-        overlap_start = max(hevy_start, act_start)
-        overlap_end = min(hevy_end, act_end)
-        overlap_s = max(0.0, (overlap_end - overlap_start).total_seconds())
-        overlap_pct = overlap_s / hevy_duration
+        # Try both Garmin GMT and local wall-clock starts. This handles both:
+        # - current Hevy values that are true UTC and match Garmin startTimeGMT
+        # - older/quirky Hevy values that are local wall-clock with +00:00 and
+        #   match Garmin startTimeLocal
+        candidate_starts: list[tuple[str, str]] = []
+        if act.get("startTimeGMT"):
+            candidate_starts.append(("GMT", act.get("startTimeGMT")))
+        if act.get("startTimeLocal"):
+            candidate_starts.append(("local", act.get("startTimeLocal")))
 
-        if overlap_pct < overlap_threshold:
-            logger.info(
-                "Merge reject %s: overlap %.1f%% below %.1f%%",
-                act_id,
-                overlap_pct * 100,
-                overlap_threshold * 100,
-            )
-            continue
+        # Avoid duplicate work if Garmin ever returns equal GMT/local strings.
+        seen_start_values: set[str] = set()
+        for time_source, act_start_raw in candidate_starts:
+            if act_start_raw in seen_start_values:
+                continue
+            seen_start_values.add(act_start_raw)
 
-        # Check start drift using local wall-clock times only.
-        drift_s = abs((act_start - hevy_start).total_seconds())
-        drift_min = drift_s / 60
-        if drift_min > max_drift_minutes:
-            logger.info(
-                "Merge reject %s: drift %.1fmin above %smin",
-                act_id,
-                drift_min,
-                max_drift_minutes,
-            )
-            continue
+            try:
+                act_start = _parse_wall_time(act_start_raw)
+            except (ValueError, TypeError):
+                logger.info("Merge reject %s: invalid %s start time %s", act_id, time_source, act_start_raw)
+                continue
 
-        # Score: overlap dominates, drift is a small penalty.
-        score = (overlap_pct * 100) - (drift_min * 0.5)
-        if score > best_score:
-            best_score = score
-            best = act
-            best_overlap_pct = overlap_pct
-            best_drift_min = drift_min
+            act_end = act_start + timedelta(seconds=act_duration)
+
+            # Compute temporal overlap using the candidate Garmin time.
+            overlap_start = max(hevy_start, act_start)
+            overlap_end = min(hevy_end, act_end)
+            overlap_s = max(0.0, (overlap_end - overlap_start).total_seconds())
+            overlap_pct = overlap_s / hevy_duration
+
+            if overlap_pct < overlap_threshold:
+                logger.info(
+                    "Merge reject %s (%s): overlap %.1f%% below %.1f%%",
+                    act_id,
+                    time_source,
+                    overlap_pct * 100,
+                    overlap_threshold * 100,
+                )
+                continue
+
+            # Check start drift using the candidate Garmin time.
+            drift_s = abs((act_start - hevy_start).total_seconds())
+            drift_min = drift_s / 60
+            if drift_min > max_drift_minutes:
+                logger.info(
+                    "Merge reject %s (%s): drift %.1fmin above %smin",
+                    act_id,
+                    time_source,
+                    drift_min,
+                    max_drift_minutes,
+                )
+                continue
+
+            # Score: overlap dominates, drift is a small penalty.
+            score = (overlap_pct * 100) - (drift_min * 0.5)
+            if score > best_score:
+                best_score = score
+                best = act
+                best_overlap_pct = overlap_pct
+                best_drift_min = drift_min
+                best_time_source = time_source
 
     if best:
         logger.info(
-            "Merge match: Garmin activity %s (overlap %.0f%%, drift %.1fmin)",
+            "Merge match: Garmin activity %s using %s time (overlap %.0f%%, drift %.1fmin)",
             best.get("activityId"),
+            best_time_source,
             best_overlap_pct * 100,
             best_drift_min,
         )
     return best
-
 
 def get_activity_exercise_sets(client: Garmin, activity_id: int) -> dict:
     """GET exercise sets for a Garmin activity (for backup before merge)."""
