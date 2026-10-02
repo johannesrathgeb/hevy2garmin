@@ -3,10 +3,6 @@ name: Fly Deploy
 on:
   workflow_dispatch:
 
-concurrency:
-  group: fly-deploy
-  cancel-in-progress: true
-
 jobs:
   deploy:
     name: Deploy to Fly.io
@@ -19,16 +15,14 @@ jobs:
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Stage secrets
+      - name: Sync secrets to Fly.io
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: ${{ secrets.FLY_APP }}
-
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           H2G_PASSWORD: ${{ secrets.H2G_PASSWORD }}
           HEVY2GARMIN_SECRET: ${{ secrets.HEVY2GARMIN_SECRET }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
-
         run: |
           {
             echo "DATABASE_URL=$DATABASE_URL"
@@ -41,5 +35,4 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: ${{ secrets.FLY_APP }}
-        run: |
-          flyctl deploy --app "$FLY_APP" --remote-only
+        run: flyctl deploy --app "$FLY_APP" --remote-only
